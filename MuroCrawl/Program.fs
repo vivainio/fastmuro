@@ -7,16 +7,16 @@ open HtmlAgilityPack
 open System
 open System.Diagnostics
 open System.Text.RegularExpressions
-
+open System.Text
 
 let pr o = 
     printfn "%A" 0
     o
     
-let fetch(url:string) = 
+let fetch(url:string, encoding: Encoding) = 
     let req = WebRequest.Create url
     let resp = req.GetResponse()
-    use sr = new StreamReader(resp.GetResponseStream())
+    use sr = new StreamReader(resp.GetResponseStream(), encoding)
     let cont = sr.ReadToEnd()
     use wr = new StreamWriter("C:/t/dump.html",false)
     wr.Write(cont)
@@ -25,12 +25,12 @@ let fetch(url:string) =
     cont
 
 
-let fetchAsync url = 
+let fetchAsync url (encoding:Encoding) = 
     async {
         let req = WebRequest.Create(Uri url)
         use! resp = req.AsyncGetResponse()
         use stream = resp.GetResponseStream()
-        use reader = new IO.StreamReader(stream)
+        use reader = new IO.StreamReader(stream, encoding)
         let html = reader.ReadToEnd()
         return html
     }
@@ -82,6 +82,8 @@ let parseForum(s:string, rootUrl) =
             yield { url = rootUrl + n.GetAttribute("href",""); t = n.ToString()} ]
 
     offers
+    
+
 
 let parseThread(s: string) = 
     let doc = new HtmlDocument()
@@ -145,31 +147,10 @@ type Reporter(fname:string) =
         <html><body>
         """
 
- 
- type Message = 
-    Job of OfferH * AsyncReplyChannel<OfferFull>      
-
-let crawlActor (inbox: MailboxProcessor<Message>) =
-    let rec loop() = async {
-        
-        let! msg = inbox.Receive()
-        match msg with 
-        | Job(offer, replyChannel) ->
-            let! cont = fetchAsync offer.url
-            let full = { offer = offer; body = {body = cont} }
-
-            printf "Reply for %A" offer.url
-            replyChannel.Reply full
-        
-        
-        return! loop()
-    }
-    
-    loop()
 
 let fetchAndParse offer = 
     async {
-        let! cont = fetchAsync offer.url
+        let! cont = fetchAsync offer.url Encoding.UTF8
         let parsed = parseThread cont
         let full = { offer = offer; body = parsed }
         return full
@@ -183,10 +164,17 @@ let forums = [
     "tietokoneet-ja-konepaketit.171","Tietokoneet"
     ]
    
+let reportTo offers outputfile =
+    let r = Reporter(outputfile)
+    r.Header()
+    offers
+    |> Seq.iter (fun offer -> r.Offer offer)
+    r.Close()
+
 let fetchForum slug outputFile =
     let rootUrl = sprintf "http://murobbs.muropaketti.com/forums/%s" slug 
 
-    let cont = fetch rootUrl
+    let cont = fetch(rootUrl,Encoding.UTF8)
     let pd = parseForum(cont, "http://murobbs.muropaketti.com/")
     //printfn "%A" pd
     let report = Reporter(outputFile)
@@ -217,9 +205,64 @@ let test1(args:string[]) =
     printfn "%A" hg
     1
 
+let extract (s:string) (sel:string) = 
+    let doc = new HtmlDocument()
+    doc.LoadHtml(s)
+    let nav = doc.CreateNavigator()
+    let ns = nav.Select(sel)
+    ns.AsEnumerable
+    
+    
+type Tori() = 
+    member x.parseThread cont =
+        let node = 
+            extract cont """//div[contains(@class,"body")]"""
+            |> Seq.head 
+  
+        
+        let iso = (node.TypedValue :?> string).Trim()
+        let enc = Encoding.GetEncoding("iso-8859-1")
+
+        
+              
+        { PostBody.body =  iso }
+
+    member x.fetchAndParse offer = 
+        
+        async {
+            let enc = Encoding.GetEncoding("iso-8859-1")
+            let! cont = fetchAsync offer.url enc
+            let parsed = x.parseThread cont
+            let full = { offer = offer; body = parsed }
+            return full
+        }
+    
+
+    member x.fetchTori(outputdir) =
+        let cont = fetch("http://www.tori.fi/satakunta/tietotekniikka?ca=10&w=1&cg=5030&st=s&st=k&st=u&st=h&st=g", 
+                    Encoding.Default)
+        //*[@id="item_17363666"]/div[3]/a
+        //$x('//div[@class="desc"]/a')
+        let iter = extract cont """//div[@class="desc"]/a"""
+        let todo = [
+            for n in iter do 
+            yield { url = n.GetAttribute("href",""); t = n.ToString()} ]
+
+        let results = Async.Parallel [for o in todo -> x.fetchAndParse o]
+
+        let offers = Async.RunSynchronously results
+
+        sprintf "%s/ToriAtk.html" outputdir
+        |> reportTo offers 
+            
+        printfn "%A" offers
+
 [<EntryPoint>]
 let main(args:string[]) =
-    fetchAllForums args.[0]
+    let tori = new Tori()
+    tori.fetchTori args.[0]
+    
+    //fetchAllForums args.[0]
     0   
 
 
